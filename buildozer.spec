@@ -14,6 +14,9 @@ android.api = 29
 android.minapi = 21
 android.ndk = 25b
 android.archs = arm64-v8a
+icon.filename = %(source.dir)s/icon.png
+icon.adaptive_foreground.filename = %(source.dir)s/icon_fg.png
+icon.adaptive_background.filename = %(source.dir)s/icon_bg.png
 android.accept_sdk_license = True
 p4a.branch = v2024.01.21
 
