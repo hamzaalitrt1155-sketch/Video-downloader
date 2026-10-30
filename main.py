@@ -1,10 +1,29 @@
 import os
+import sys
 import threading
+import traceback
+
+
+class _BosAkim:
+    def write(self, s):
+        return len(s) if s else 0
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+
+for _ad in ("stdout", "stderr"):
+    _akim = getattr(sys, _ad, None)
+    if _akim is None or isinstance(_akim, str) or not hasattr(_akim, "write"):
+        setattr(sys, _ad, _BosAkim())
 
 try:
     import certifi
     os.environ["SSL_CERT_FILE"] = certifi.where()
-except ImportError:
+except Exception:
     pass
 
 import yt_dlp
@@ -16,6 +35,23 @@ from kivy.uix.label import Label
 from kivy.uix.progressbar import ProgressBar
 from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
+
+
+class SessizGunluk:
+    def __init__(self):
+        self.son_hata = ""
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        self.son_hata = str(msg)
 
 
 def indirme_klasoru():
@@ -81,22 +117,27 @@ class VideoIndirici(App):
         threading.Thread(target=self.indir, args=(link,), daemon=True).start()
 
     def ilerleme(self, d):
-        if d["status"] == "downloading":
+        if d.get("status") == "downloading":
             toplam = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             if toplam:
-                yuzde = d["downloaded_bytes"] * 100 / toplam
+                yuzde = d.get("downloaded_bytes", 0) * 100 / toplam
                 self.ui(lambda: setattr(self.bar, "value", yuzde))
                 self.ui(lambda: setattr(self.durum, "text",
                                         f"İndiriliyor… %{yuzde:.1f}"))
-        elif d["status"] == "finished":
+        elif d.get("status") == "finished":
             self.ui(lambda: setattr(self.durum, "text", "Kaydediliyor…"))
 
     def indir(self, link):
+        gunluk = SessizGunluk()
         secenekler = {
             "outtmpl": os.path.join(indirme_klasoru(), "%(title)s.%(ext)s"),
             "progress_hooks": [self.ilerleme],
             "noplaylist": True,
             "restrictfilenames": True,
+            "logger": gunluk,
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
         }
         if self.tur.text.startswith("Sadece ses"):
             secenekler["format"] = "bestaudio[ext=m4a]/bestaudio"
@@ -109,8 +150,11 @@ class VideoIndirici(App):
                                     "Tamamlandı ✔ İndirilenler klasörüne kaydedildi"))
             self.ui(lambda: setattr(self.bar, "value", 100))
         except Exception as e:
-            hata = str(e)[:200]
-            self.ui(lambda: setattr(self.durum, "text", f"Hata: {hata}"))
+            satirlar = traceback.format_exc().strip().splitlines()
+            konum = " | ".join(s.strip() for s in satirlar[-4:-1])[-220:]
+            hata = (gunluk.son_hata or str(e))[:200]
+            mesaj = f"Hata: {hata}\n{konum}"
+            self.ui(lambda: setattr(self.durum, "text", mesaj))
         finally:
             self.ui(lambda: setattr(self.btn, "disabled", False))
 
