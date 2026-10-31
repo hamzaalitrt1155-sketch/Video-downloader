@@ -37,11 +37,15 @@ from yt_dlp.utils import sanitize_filename
 import mp4muxer
 from kivy.app import App
 from kivy.clock import Clock
+from kivy.core.clipboard import Clipboard
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
+from kivy.uix.gridlayout import GridLayout
 from kivy.uix.image import Image
 from kivy.uix.label import Label
+from kivy.uix.modalview import ModalView
 from kivy.uix.progressbar import ProgressBar
+from kivy.uix.scrollview import ScrollView
 from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
 
@@ -166,10 +170,30 @@ def kapak_indir(adres, hedef):
         f.write(veri)
 
 
+def arama_sonuclari(bilgi):
+    sonuc = []
+    for e in (bilgi or {}).get("entries") or []:
+        if not isinstance(e, dict):
+            continue
+        vid = e.get("id") or ""
+        if len(vid) != 11:
+            continue
+        sonuc.append({
+            "id": vid,
+            "baslik": e.get("title") or "Başlık yok",
+            "kanal": e.get("channel") or e.get("uploader") or "",
+            "sure": sure_yazisi(e.get("duration")) if e.get("duration") else "",
+            "link": f"https://www.youtube.com/watch?v={vid}",
+        })
+    return sonuc
+
+
 class VideoIndirici(App):
     def build(self):
         self.title = "Video İndirici"
         self.onizleme_no = 0
+        self.arama_no = 0
+        self.sonuc_resimleri = {}
         self.faz = (0, 100, "")
         self.bekleyen = None
 
@@ -178,13 +202,29 @@ class VideoIndirici(App):
         kok.add_widget(Label(text="Video İndirici", font_size="26sp",
                              size_hint_y=None, height=60))
 
-        self.url = TextInput(hint_text="Video bağlantısını yapıştırın",
-                             multiline=False, size_hint_y=None, height=100,
-                             font_size="16sp")
-        self.url.bind(text=self.link_degisti)
-        kok.add_widget(self.url)
+        arama_satir = BoxLayout(orientation="horizontal", size_hint_y=None,
+                                height=100, spacing=10)
+        self.arama = TextInput(hint_text="YouTube'da ara", multiline=False,
+                               font_size="16sp")
+        self.arama.bind(on_text_validate=self.ara)
+        arama_satir.add_widget(self.arama)
+        ara_btn = Button(text="Ara", size_hint_x=None, width=200)
+        ara_btn.bind(on_release=self.ara)
+        arama_satir.add_widget(ara_btn)
+        kok.add_widget(arama_satir)
 
-        self.kapak = Image(size_hint_y=None, height=220, fit_mode="contain")
+        link_satir = BoxLayout(orientation="horizontal", size_hint_y=None,
+                               height=100, spacing=10)
+        self.url = TextInput(hint_text="veya bağlantıyı yapıştırın",
+                             multiline=False, font_size="16sp")
+        self.url.bind(text=self.link_degisti)
+        link_satir.add_widget(self.url)
+        yap_btn = Button(text="Yapıştır", size_hint_x=None, width=240)
+        yap_btn.bind(on_release=self.yapistir)
+        link_satir.add_widget(yap_btn)
+        kok.add_widget(link_satir)
+
+        self.kapak = Image(size_hint_y=None, height=200, fit_mode="contain")
         kok.add_widget(self.kapak)
 
         self.baslik = Label(text="", halign="center", valign="middle",
@@ -224,6 +264,171 @@ class VideoIndirici(App):
                                  Permission.READ_EXTERNAL_STORAGE])
         except ImportError:
             pass
+        try:
+            from android import activity
+            activity.bind(on_new_intent=self.yeni_intent)
+        except Exception:
+            pass
+        link = self.paylasilan_baglanti()
+        if link and not self.url.text.strip():
+            self.url.text = link
+            self.durum.text = "Paylaşılan bağlantı alındı."
+
+    # ---------- paylasim ve pano ----------
+
+    def paylasilan_baglanti(self, intent=None):
+        """Baska uygulamadan 'Paylas' ile gelen metindeki baglantiyi dondurur."""
+        try:
+            if intent is None:
+                from jnius import autoclass
+                intent = autoclass("org.kivy.android.PythonActivity").mActivity.getIntent()
+            if intent is None:
+                return ""
+            if intent.getAction() != "android.intent.action.SEND":
+                return ""
+            metin = intent.getStringExtra("android.intent.extra.TEXT") or ""
+        except Exception:
+            return ""
+        m = re.search(r"https?://\S+", str(metin))
+        return m.group(0) if m else ""
+
+    def yeni_intent(self, intent):
+        link = self.paylasilan_baglanti(intent)
+        if not link:
+            return
+
+        def uygula():
+            self.url.text = link
+            self.durum.text = "Paylaşılan bağlantı alındı."
+        self.ui(uygula)
+
+    def yapistir(self, *_):
+        try:
+            metin = Clipboard.paste() or ""
+        except Exception:
+            metin = ""
+        m = re.search(r"https?://\S+", metin)
+        if m:
+            self.url.text = m.group(0)
+        else:
+            self.durum.text = "Panoda bağlantı bulunamadı."
+
+    # ---------- uygulama ici arama ----------
+
+    def ara(self, *_):
+        sorgu = self.arama.text.strip()
+        if not sorgu:
+            return
+        self.arama_no += 1
+        no = self.arama_no
+        self.sonuc_penceresi_ac()
+        threading.Thread(target=self.ara_is, args=(sorgu, no), daemon=True).start()
+
+    def sonuc_penceresi_ac(self):
+        pencere = ModalView(size_hint=(1, 1), auto_dismiss=True,
+                            background_color=(0, 0, 0, 0.96))
+        ic = BoxLayout(orientation="vertical", padding=16, spacing=10)
+
+        ust = BoxLayout(orientation="horizontal", size_hint_y=None,
+                        height=90, spacing=10)
+        self.sonuc_baslik = Label(text="Aranıyor…", font_size="16sp", halign="left")
+        self.sonuc_baslik.bind(size=lambda w, s: setattr(w, "text_size", (s[0], None)))
+        kapat = Button(text="Kapat", size_hint_x=None, width=200)
+        kapat.bind(on_release=lambda *_: pencere.dismiss())
+        ust.add_widget(self.sonuc_baslik)
+        ust.add_widget(kapat)
+
+        kaydir = ScrollView(do_scroll_x=False)
+        self.sonuc_liste = GridLayout(cols=1, spacing=10, size_hint_y=None)
+        self.sonuc_liste.bind(minimum_height=self.sonuc_liste.setter("height"))
+        kaydir.add_widget(self.sonuc_liste)
+
+        ic.add_widget(ust)
+        ic.add_widget(kaydir)
+        pencere.add_widget(ic)
+        self.sonuc_pencere = pencere
+        self.sonuc_resimleri = {}
+        pencere.open()
+
+    def ara_is(self, sorgu, no):
+        try:
+            opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "logger": SessizGunluk(),
+                "extract_flat": True,
+                "skip_download": True,
+                "socket_timeout": 20,
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                bilgi = ydl.extract_info(f"ytsearch15:{sorgu}", download=False)
+            liste = arama_sonuclari(bilgi)
+        except Exception as e:
+            hata = kisa_hata(e, 120)
+            self.ui(lambda: self.sonuc_hata(no, hata))
+            return
+        self.ui(lambda: self.sonuclari_goster(no, liste, sorgu))
+
+        klasor = os.path.join(self.user_data_dir, "ara")
+        try:
+            os.makedirs(klasor, exist_ok=True)
+            simdi = time.time()
+            for dosya in os.listdir(klasor):
+                yol = os.path.join(klasor, dosya)
+                if simdi - os.path.getmtime(yol) > 7 * 24 * 3600:
+                    os.remove(yol)
+        except OSError:
+            pass
+        for o in liste:
+            if no != self.arama_no:
+                return
+            yol = os.path.join(klasor, o["id"] + ".jpg")
+            try:
+                if not os.path.exists(yol):
+                    kapak_indir(f"https://i.ytimg.com/vi/{o['id']}/mqdefault.jpg", yol)
+                self.ui(lambda vid=o["id"], y=yol: self.resim_ata(no, vid, y))
+            except Exception:
+                pass
+
+    def sonuc_hata(self, no, hata):
+        if no == self.arama_no:
+            self.sonuc_baslik.text = f"Arama başarısız: {hata}"
+
+    def sonuclari_goster(self, no, liste, sorgu):
+        if no != self.arama_no:
+            return
+        self.sonuc_liste.clear_widgets()
+        self.sonuc_resimleri = {}
+        self.sonuc_baslik.text = (f"{sorgu}: {len(liste)} sonuç. Birine dokunun."
+                                  if liste else "Sonuç bulunamadı")
+        for o in liste:
+            satir = BoxLayout(orientation="horizontal", size_hint_y=None,
+                              height=150, spacing=10)
+            resim = Image(size_hint_x=None, width=270, fit_mode="contain")
+            alt = " · ".join(x for x in (o["kanal"], o["sure"]) if x)
+            dugme = Button(text=f"{o['baslik']}\n{alt}", halign="left",
+                           valign="middle", font_size="14sp", max_lines=4)
+            dugme.bind(size=lambda w, s: setattr(w, "text_size", (s[0] - 24, s[1])))
+            dugme.bind(on_release=lambda *_, l=o["link"]: self.sonuc_sec(l))
+            satir.add_widget(resim)
+            satir.add_widget(dugme)
+            self.sonuc_liste.add_widget(satir)
+            self.sonuc_resimleri[o["id"]] = resim
+
+    def resim_ata(self, no, vid, yol):
+        if no != self.arama_no:
+            return
+        resim = self.sonuc_resimleri.get(vid)
+        if resim is not None:
+            resim.source = yol
+            resim.reload()
+
+    def sonuc_sec(self, link):
+        try:
+            self.sonuc_pencere.dismiss()
+        except Exception:
+            pass
+        self.url.text = link
 
     def ui(self, fn):
         Clock.schedule_once(lambda dt: fn(), 0)
