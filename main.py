@@ -130,9 +130,15 @@ class VideoIndirici(App):
         kok.add_widget(self.kapak)
 
         self.baslik = Label(text="", halign="center", valign="middle",
-                            size_hint_y=None, height=80, font_size="15sp")
+                            size_hint_y=None, height=70, font_size="15sp",
+                            max_lines=2, shorten=True, shorten_from="right")
         self.baslik.bind(size=lambda w, s: setattr(w, "text_size", (s[0], s[1])))
         kok.add_widget(self.baslik)
+
+        self.alt = Label(text="", halign="center", size_hint_y=None, height=30,
+                         font_size="13sp", color=(0.7, 0.7, 0.7, 1))
+        self.alt.bind(size=lambda w, s: setattr(w, "text_size", (s[0], None)))
+        kok.add_widget(self.alt)
 
         self.tur = Spinner(text="Video (MP4)",
                            values=("Video (MP4)", "Sadece ses (M4A)"),
@@ -172,6 +178,7 @@ class VideoIndirici(App):
         if not metin.lower().startswith("http"):
             self.kapak.source = ""
             self.baslik.text = ""
+            self.alt.text = ""
             return
         no = self.onizleme_no
         self.bekleyen = Clock.schedule_once(
@@ -179,6 +186,7 @@ class VideoIndirici(App):
 
     def onizleme_baslat(self, link, no):
         self.baslik.text = "Önizleme yükleniyor…"
+        self.alt.text = ""
         self.kapak.source = ""
         threading.Thread(target=self.onizleme_al, args=(link, no),
                          daemon=True).start()
@@ -202,10 +210,7 @@ class VideoIndirici(App):
             baslik = bilgi.get("title") or "Başlık yok"
             sure = sure_yazisi(bilgi.get("duration"))
             kanal = bilgi.get("uploader") or ""
-            satirlar = [baslik]
             alt = " · ".join(x for x in (kanal, sure) if x)
-            if alt:
-                satirlar.append(alt)
 
             yol = ""
             adres = kapak_adresi(bilgi)
@@ -219,7 +224,8 @@ class VideoIndirici(App):
             def goster():
                 if no != self.onizleme_no:
                     return
-                self.baslik.text = "\n".join(satirlar)
+                self.baslik.text = baslik
+                self.alt.text = alt
                 if yol:
                     self.kapak.source = yol
                     self.kapak.reload()
@@ -253,9 +259,9 @@ class VideoIndirici(App):
         elif d.get("status") == "finished":
             self.ui(lambda: setattr(self.durum, "text", "Kaydediliyor…"))
 
-    def indir(self, link):
-        gunluk = SessizGunluk()
-        secenekler = {
+    def secenekler(self, gunluk, istemci, sadece_liste=False):
+        ses = self.tur.text.startswith("Sadece ses")
+        o = {
             "outtmpl": os.path.join(indirme_klasoru(), "%(title)s.%(ext)s"),
             "progress_hooks": [self.ilerleme],
             "noplaylist": True,
@@ -264,22 +270,69 @@ class VideoIndirici(App):
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
+            "socket_timeout": 20,
+            "format": "bestaudio[ext=m4a]/bestaudio" if ses else "best[ext=mp4]/best",
         }
-        if self.tur.text.startswith("Sadece ses"):
-            secenekler["format"] = "bestaudio[ext=m4a]/bestaudio"
-        else:
-            secenekler["format"] = "best[ext=mp4]/best"
+        if istemci:
+            o["extractor_args"] = {"youtube": {"player_client": [istemci]}}
+        if sadece_liste:
+            o["skip_download"] = True
+            o["ignore_no_formats_error"] = True
+        return o
+
+    def format_ozeti(self, link):
+        parcalar = []
+        for istemci in (None, "android_vr"):
+            try:
+                with yt_dlp.YoutubeDL(self.secenekler(SessizGunluk(), istemci, True)) as ydl:
+                    bilgi = ydl.extract_info(link, download=False)
+                fl = bilgi.get("formats") or []
+                ortak = vid = ses = 0
+                for f in fl:
+                    v = f.get("vcodec") not in (None, "none")
+                    a = f.get("acodec") not in (None, "none")
+                    if v and a:
+                        ortak += 1
+                    elif v:
+                        vid += 1
+                    elif a:
+                        ses += 1
+                parcalar.append(f"{istemci or 'varsayilan'}: ortak={ortak} video={vid} ses={ses}")
+            except Exception:
+                parcalar.append(f"{istemci or 'varsayilan'}: alinamadi")
+        return " | ".join(parcalar)
+
+    def indir(self, link):
+        youtube = any(x in link.lower() for x in ("youtube.com", "youtu.be"))
+        istemciler = [None, "android_vr", "web_safari", "ios", "tv", "mweb"] if youtube else [None]
+        son_hata = ""
         try:
-            with yt_dlp.YoutubeDL(secenekler) as ydl:
-                ydl.download([link])
-            self.ui(lambda: setattr(self.durum, "text",
-                                    "Tamamlandı ✔ İndirilenler klasörüne kaydedildi"))
-            self.ui(lambda: setattr(self.bar, "value", 100))
+            for sira, istemci in enumerate(istemciler, 1):
+                gunluk = SessizGunluk()
+                if len(istemciler) > 1:
+                    self.ui(lambda s=sira: setattr(
+                        self.durum, "text", f"Deneniyor… ({s}/{len(istemciler)})"))
+                try:
+                    with yt_dlp.YoutubeDL(self.secenekler(gunluk, istemci)) as ydl:
+                        ydl.download([link])
+                    ek = f" (yöntem: {istemci or 'varsayılan'})" if youtube else ""
+                    self.ui(lambda ek=ek: setattr(
+                        self.durum, "text",
+                        "Tamamlandı ✔ İndirilenler klasörüne kaydedildi" + ek))
+                    self.ui(lambda: setattr(self.bar, "value", 100))
+                    return
+                except Exception as e:
+                    son_hata = gunluk.son_hata or str(e)
+
+            ozet = self.format_ozeti(link) if youtube else ""
+            mesaj = f"Hata: {son_hata[:170]}"
+            if ozet:
+                mesaj += f"\n{ozet}"
+            self.ui(lambda: setattr(self.durum, "text", mesaj))
         except Exception as e:
             satirlar = traceback.format_exc().strip().splitlines()
             konum = " | ".join(s.strip() for s in satirlar[-4:-1])[-220:]
-            hata = (gunluk.son_hata or str(e))[:200]
-            mesaj = f"Hata: {hata}\n{konum}"
+            mesaj = f"Hata: {str(e)[:200]}\n{konum}"
             self.ui(lambda: setattr(self.durum, "text", mesaj))
         finally:
             self.ui(lambda: setattr(self.btn, "disabled", False))
