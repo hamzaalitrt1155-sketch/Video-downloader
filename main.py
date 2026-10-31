@@ -153,7 +153,7 @@ class VideoIndirici(App):
         self.btn.bind(on_release=self.baslat)
         kok.add_widget(self.btn)
 
-        self.durum = Label(text="Hazır", halign="center")
+        self.durum = Label(text="Hazır", halign="center", font_size="12sp")
         self.durum.bind(size=lambda w, s: setattr(w, "text_size", (s[0], None)))
         kok.add_widget(self.durum)
         return kok
@@ -280,32 +280,35 @@ class VideoIndirici(App):
             o["ignore_no_formats_error"] = True
         return o
 
-    def format_ozeti(self, link):
+    def format_ozeti(self, link, istemciler):
         parcalar = []
-        for istemci in (None, "android_vr"):
+        for istemci in istemciler:
+            ad = istemci or "varsayilan"
             try:
                 with yt_dlp.YoutubeDL(self.secenekler(SessizGunluk(), istemci, True)) as ydl:
                     bilgi = ydl.extract_info(link, download=False)
-                fl = bilgi.get("formats") or []
                 ortak = vid = ses = 0
-                for f in fl:
+                ortak_bilgi = ""
+                for f in bilgi.get("formats") or []:
                     v = f.get("vcodec") not in (None, "none")
                     a = f.get("acodec") not in (None, "none")
                     if v and a:
                         ortak += 1
+                        ortak_bilgi = f"{f.get('format_id')}/{f.get('ext')}/{f.get('height')}p/{f.get('protocol')}"
                     elif v:
                         vid += 1
                     elif a:
                         ses += 1
-                parcalar.append(f"{istemci or 'varsayilan'}: ortak={ortak} video={vid} ses={ses}")
+                ek = f" [{ortak_bilgi}]" if ortak_bilgi else ""
+                parcalar.append(f"{ad}: {ortak}/{vid}/{ses}{ek}")
             except Exception:
-                parcalar.append(f"{istemci or 'varsayilan'}: alinamadi")
-        return " | ".join(parcalar)
+                parcalar.append(f"{ad}: yok")
+        return "\n".join(parcalar)
 
     def indir(self, link):
         youtube = any(x in link.lower() for x in ("youtube.com", "youtu.be"))
         istemciler = [None, "android_vr", "web_safari", "ios", "tv", "mweb"] if youtube else [None]
-        son_hata = ""
+        hatalar = []
         try:
             for sira, istemci in enumerate(istemciler, 1):
                 gunluk = SessizGunluk()
@@ -322,12 +325,16 @@ class VideoIndirici(App):
                     self.ui(lambda: setattr(self.bar, "value", 100))
                     return
                 except Exception as e:
-                    son_hata = gunluk.son_hata or str(e)
+                    metin = (gunluk.son_hata or str(e)).replace("ERROR: ", "")
+                    if "]" in metin[:40]:
+                        metin = metin.split("]", 1)[1].strip()
+                    hatalar.append(f"{istemci or 'varsayilan'}: {metin[:70]}")
 
-            ozet = self.format_ozeti(link) if youtube else ""
-            mesaj = f"Hata: {son_hata[:170]}"
-            if ozet:
-                mesaj += f"\n{ozet}"
+            mesaj = "Hata. Denemeler:\n" + "\n".join(hatalar)
+            if youtube:
+                self.ui(lambda: setattr(self.durum, "text", mesaj + "\nFormatlar hazırlanıyor…"))
+                ozet = self.format_ozeti(link, istemciler)
+                mesaj += "\n\nFormatlar (ortak/video/ses):\n" + ozet
             self.ui(lambda: setattr(self.durum, "text", mesaj))
         except Exception as e:
             satirlar = traceback.format_exc().strip().splitlines()
