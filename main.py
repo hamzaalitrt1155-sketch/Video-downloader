@@ -73,6 +73,34 @@ def indirme_klasoru():
     return yol
 
 
+def ekran_acik(ac):
+    """Indirme sirasinda ekranin kapanip agin kesilmesini onler (yalniz Android)."""
+    try:
+        from android.runnable import run_on_ui_thread
+        from jnius import autoclass
+
+        @run_on_ui_thread
+        def _yap():
+            etkinlik = autoclass("org.kivy.android.PythonActivity").mActivity
+            bayrak = autoclass("android.view.WindowManager$LayoutParams").FLAG_KEEP_SCREEN_ON
+            pencere = etkinlik.getWindow()
+            if ac:
+                pencere.addFlags(bayrak)
+            else:
+                pencere.clearFlags(bayrak)
+
+        _yap()
+    except Exception:
+        pass
+
+
+def ag_hatasi(metin):
+    m = str(metin).lower()
+    return any(x in m for x in ("got error", "fail", "timed out", "connection",
+                                "errno", "reset", "unreachable", "incomplete",
+                                "temporar", "resolve", "ssl"))
+
+
 def benzersiz_yol(yol):
     if not os.path.exists(yol):
         return yol
@@ -276,7 +304,8 @@ class VideoIndirici(App):
             return
         self.btn.disabled = True
         self.bar.value = 0
-        self.durum.text = "Başlıyor…"
+        self.durum.text = "Başlıyor… (indirme bitene kadar uygulamadan çıkmayın)"
+        ekran_acik(True)
         threading.Thread(target=self.indir, args=(link,), daemon=True).start()
 
     def ilerleme(self, d):
@@ -308,10 +337,18 @@ class VideoIndirici(App):
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
-            "socket_timeout": 20,
+            "socket_timeout": 30,
+            "retries": 20,
+            "fragment_retries": 20,
+            "retry_sleep_functions": {
+                "http": lambda n: min(2 * n, 15),
+                "fragment": lambda n: min(2 * n, 15),
+            },
             "format": ("bestaudio[ext=m4a]/bestaudio" if ses else
                        f"best[height<={h}][ext=mp4]/best[height<={h}]/best[ext=mp4]/best"),
         }
+        if getattr(self, "ipv4", False):
+            o["source_address"] = "0.0.0.0"
         if istemci:
             o["extractor_args"] = {"youtube": {"player_client": [istemci]}}
         if sadece_liste:
@@ -350,79 +387,101 @@ class VideoIndirici(App):
         return "\n".join(parcalar)
 
     def parcali_indir(self, link):
-        """Goruntu ve sesi ayri indirip FFmpeg olmadan birlestirir."""
+        """Goruntu ve sesi ayri indirip FFmpeg olmadan birlestirir.
+        Gecici dosyalar basarisizlikta korunur; yeniden denemede kaldigi yerden surer."""
         h = self.yukseklik()
         gecici = os.path.join(self.user_data_dir, "gecici")
-        shutil.rmtree(gecici, ignore_errors=True)
         os.makedirs(gecici, exist_ok=True)
-        kimlik = str(int(time.time()))
-        vyol = ayol = None
-        try:
-            gunluk = SessizGunluk()
-            v_sec = self.secenekler(gunluk, None)
-            v_sec["format"] = (f"bestvideo[height<={h}][ext=mp4][vcodec^=avc1]/"
-                               f"bestvideo[height<={h}][ext=mp4]/worstvideo[ext=mp4]")
-            v_sec["outtmpl"] = os.path.join(gecici, f"v{kimlik}.%(ext)s")
-            self.faz = (0, 78, "Görüntü")
-            with yt_dlp.YoutubeDL(v_sec) as ydl:
-                bilgi = ydl.extract_info(link, download=True)
-                vyol = indirilen_dosya(bilgi, ydl)
-
-            a_sec = self.secenekler(gunluk, None)
-            a_sec["format"] = "bestaudio[ext=m4a]"
-            a_sec["outtmpl"] = os.path.join(gecici, f"a{kimlik}.%(ext)s")
-            self.faz = (78, 92, "Ses")
-            with yt_dlp.YoutubeDL(a_sec) as ydl:
-                abilgi = ydl.extract_info(link, download=True)
-                ayol = indirilen_dosya(abilgi, ydl)
-
-            ad = sanitize_filename(bilgi.get("title") or "video").strip(" .")[:80] or "video"
-            klasor = indirme_klasoru()
-            cikis = benzersiz_yol(os.path.join(klasor, ad + ".mp4"))
-
-            self.ui(lambda: setattr(self.durum, "text", "Birleştiriliyor…"))
-
-            def birlesme(oran):
-                v = 92 + 8 * oran
-                self.ui(lambda: setattr(self.bar, "value", v))
-
+        simdi = time.time()
+        for dosya in os.listdir(gecici):
+            yol = os.path.join(gecici, dosya)
             try:
-                mp4muxer.birlestir(vyol, ayol, cikis, bilgi.get("duration"), birlesme)
-            except Exception as e:
-                try:
-                    os.remove(cikis)
-                except OSError:
-                    pass
-                v_son = benzersiz_yol(os.path.join(klasor, ad + " (görüntü).mp4"))
-                a_son = benzersiz_yol(os.path.join(klasor, ad + " (ses).m4a"))
-                shutil.move(vyol, v_son)
-                shutil.move(ayol, a_son)
-                vyol = ayol = None
-                mesaj = ("Birleştirilemedi (" + kisa_hata(e, 60) + "). "
-                         "Görüntü ve ses ayrı dosyalar olarak İndirilenler'e kaydedildi.")
-                self.ui(lambda: setattr(self.durum, "text", mesaj))
-                return True
+                if simdi - os.path.getmtime(yol) > 24 * 3600:
+                    os.remove(yol)
+            except OSError:
+                pass
 
-            etiket = f"Tamamlandı ✔ {h}p'ye kadar, görüntü+ses birleştirildi.\nİndirilenler: {os.path.basename(cikis)}"
-            self.ui(lambda: setattr(self.durum, "text", etiket))
-            self.ui(lambda: setattr(self.bar, "value", 100))
+        gunluk = SessizGunluk()
+        v_sec = self.secenekler(gunluk, None)
+        v_sec["format"] = (f"bestvideo[height<={h}][ext=mp4][vcodec^=avc1]/"
+                           f"bestvideo[height<={h}][ext=mp4]/worstvideo[ext=mp4]")
+        v_sec["outtmpl"] = os.path.join(gecici, f"v_{h}_%(id)s.%(ext)s")
+        self.faz = (0, 78, "Görüntü")
+        with yt_dlp.YoutubeDL(v_sec) as ydl:
+            bilgi = ydl.extract_info(link, download=True)
+            vyol = indirilen_dosya(bilgi, ydl)
+
+        a_sec = self.secenekler(gunluk, None)
+        a_sec["format"] = "bestaudio[ext=m4a]"
+        a_sec["outtmpl"] = os.path.join(gecici, "a_%(id)s.%(ext)s")
+        self.faz = (78, 92, "Ses")
+        with yt_dlp.YoutubeDL(a_sec) as ydl:
+            abilgi = ydl.extract_info(link, download=True)
+            ayol = indirilen_dosya(abilgi, ydl)
+
+        ad = sanitize_filename(bilgi.get("title") or "video").strip(" .")[:80] or "video"
+        klasor = indirme_klasoru()
+        cikis = benzersiz_yol(os.path.join(klasor, ad + ".mp4"))
+
+        self.ui(lambda: setattr(self.durum, "text", "Birleştiriliyor…"))
+
+        def birlesme(oran):
+            v = 92 + 8 * oran
+            self.ui(lambda: setattr(self.bar, "value", v))
+
+        try:
+            mp4muxer.birlestir(vyol, ayol, cikis, bilgi.get("duration"), birlesme)
+        except Exception as e:
+            try:
+                os.remove(cikis)
+            except OSError:
+                pass
+            v_son = benzersiz_yol(os.path.join(klasor, ad + " (görüntü).mp4"))
+            a_son = benzersiz_yol(os.path.join(klasor, ad + " (ses).m4a"))
+            shutil.move(vyol, v_son)
+            shutil.move(ayol, a_son)
+            mesaj = ("Birleştirilemedi (" + kisa_hata(e, 60) + "). "
+                     "Görüntü ve ses ayrı dosyalar olarak İndirilenler'e kaydedildi.")
+            self.ui(lambda: setattr(self.durum, "text", mesaj))
             return True
-        finally:
-            shutil.rmtree(gecici, ignore_errors=True)
+
+        for dosya in (vyol, ayol):
+            try:
+                os.remove(dosya)
+            except OSError:
+                pass
+        etiket = (f"Tamamlandı ✔ {h}p'ye kadar, görüntü+ses birleştirildi.\n"
+                  f"İndirilenler: {os.path.basename(cikis)}")
+        self.ui(lambda: setattr(self.durum, "text", etiket))
+        self.ui(lambda: setattr(self.bar, "value", 100))
+        return True
 
     def indir(self, link):
         ses = self.tur.text.startswith("Sadece ses")
         youtube = any(x in link.lower() for x in ("youtube.com", "youtu.be"))
         istemciler = [None, "android_vr", "web_safari", "ios", "tv", "mweb"] if youtube else [None]
         hatalar = []
+        self.ipv4 = False
         try:
             if youtube and not ses:
-                try:
-                    self.parcali_indir(link)
-                    return
-                except Exception as e:
-                    hatalar.append("birlestirme: " + kisa_hata(e, 90))
-                    self.faz = (0, 100, "")
+                for deneme in range(1, 4):
+                    self.ipv4 = deneme >= 2
+                    try:
+                        self.parcali_indir(link)
+                        return
+                    except Exception as e:
+                        metin = str(e)
+                        hatalar.append(f"birlestirme{deneme}{' (ipv4)' if self.ipv4 else ''}: "
+                                       + kisa_hata(metin, 140))
+                        self.faz = (0, 100, "")
+                        if deneme < 3 and ag_hatasi(metin):
+                            self.ui(lambda d=deneme: setattr(
+                                self.durum, "text",
+                                f"Bağlantı koptu, kaldığı yerden devam ediliyor ({d + 1}/3)…"))
+                            time.sleep(3)
+                        else:
+                            break
+                self.ipv4 = False
 
             for sira, istemci in enumerate(istemciler, 1):
                 gunluk = SessizGunluk()
@@ -455,6 +514,7 @@ class VideoIndirici(App):
             self.ui(lambda: setattr(self.durum, "text", mesaj))
         finally:
             self.faz = (0, 100, "")
+            ekran_acik(False)
             self.ui(lambda: setattr(self.btn, "disabled", False))
 
 
